@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Polygon Arbitrage Interface</title>
+  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+  <style>
+    body {
+      background-color: #014421;
+      color: white;
+      font-family: Arial, sans-serif;
+      padding: 20px;
+    }
+    input, button, select {
+      margin: 6px 0;
+      padding: 6px;
+      width: 320px;
+    }
+    .log, .sheet, .info {
+      background: #112;
+      padding: 12px;
+      border-radius: 10px;
+      margin-top: 20px;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+    }
+    th, td {
+      border: 1px solid #444;
+      padding: 6px;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <h2>Polygon Arbitrage Interface</h2>
+
+  <button onclick="connectWallet()">Connect MetaMask</button><br>
+  <div>Wallet: <span id="wallet">Not connected</span></div>
+  <div>Balance: <span id="balance">-</span></div><br>
+
+  <label>Enter ERC20 Token Address (default: USDC):</label><br>
+  <input type="text" id="customToken" value="0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" /><br>
+
+  <label>Amount In (tokens):</label><br>
+  <input type="number" id="amountIn" value="10" /><br>
+
+  <label>Batch Size (Txs every 3s):</label><br>
+  <input type="number" id="batchSize" value="3" /><br>
+
+  <label>Gas Cost Estimate (USD):</label><br>
+  <input type="number" id="gasCost" value="0.1" /><br>
+
+  <label>DEX Fee % (per swap):</label><br>
+  <input type="number" id="feePercent" value="0.3" /><br>
+
+  <label>Min Profit % to Trade:</label><br>
+  <input type="number" id="minProfit" value="0.1" /><br>
+
+  <label>Buy from DEX:</label><br>
+  <select id="buyDex">
+    <option value="quick">QuickSwap</option>
+    <option value="sushi">SushiSwap</option>
+  </select><br>
+
+  <label>Sell to DEX:</label><br>
+  <select id="sellDex">
+    <option value="sushi">SushiSwap</option>
+    <option value="quick">QuickSwap</option>
+  </select><br>
+
+  <input type="checkbox" id="onlyIfProfitable" checked />
+  <label for="onlyIfProfitable">Trade only if profitable</label><br><br>
+
+  <button onclick="startBatch()">Start Batch Trades</button>
+
+  <div class="info" id="estimateBox">
+    <strong>Estimated Profit Info:</strong><br>
+    Token: <span id="tokenSymbol">USDC</span><br>
+    Batch Size: <span id="batchInfo">-</span><br>
+    Estimated Profit: <span id="estProfit">$0.00</span><br>
+    Estimated Profit %: <span id="estPct">0%</span>
+  </div>
+
+  <div class="log" id="log">Ready...</div>
+
+  <div class="sheet" id="sheet">
+    <h4>Spreadsheet Log</h4>
+    <table id="logTable">
+      <tr><th>Time</th><th>Buy DEX</th><th>Sell DEX</th><th>Est. Profit $</th><th>Est. %</th><th>Status</th><th>Tx Hash</th></tr>
+    </table>
+  </div>
+
+  <script>
+    let signer, provider, user;
+    let tokenContract, tokenDecimals;
+
+    const WETH = "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619";
+    const ROUTERS = {
+      quick: {
+        name: "QuickSwap",
+        address: "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff"
+      },
+      sushi: {
+        name: "SushiSwap",
+        address: "0x1b02da8cb0d097eb8d57a175b88c7d8b47997506"
+      }
+    };
+
+    const ROUTER_ABI = [
+      "function getAmountsOut(uint amountIn, address[] memory path) view returns (uint[] memory)",
+      "function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external returns (uint[] memory amounts)"
+    ];
+
+    const ERC20_ABI = [
+      "function approve(address spender, uint amount) external returns (bool)",
+      "function allowance(address owner, address spender) external view returns (uint)",
+      "function decimals() view returns (uint8)",
+      "function symbol() view returns (string)",
+      "function balanceOf(address owner) view returns (uint)"
+    ];
+
+    async function connectWallet() {
+      if (window.ethereum) {
+        provider = new ethers.providers.Web3Provider(window.ethereum);
+        await provider.send("eth_requestAccounts", []);
+        signer = provider.getSigner();
+        user = await signer.getAddress();
+        document.getElementById("wallet").textContent = user;
+        await updateBalance();
+      } else {
+        alert("MetaMask not detected!");
+      }
+    }
+
+    async function updateBalance() {
+      const tokenAddr = document.getElementById("customToken").value;
+      tokenContract = new ethers.Contract(tokenAddr, ERC20_ABI, signer);
+      tokenDecimals = await tokenContract.decimals();
+      const balance = await tokenContract.balanceOf(user);
+      const symbol = await tokenContract.symbol();
+      document.getElementById("tokenSymbol").textContent = symbol;
+      document.getElementById("balance").textContent =
+        parseFloat(ethers.utils.formatUnits(balance, tokenDecimals)).toFixed(2) + " " + symbol;
+    }
+
+    async function startBatch() {
+      const tokenAddr = document.getElementById("customToken").value;
+      const amount = parseFloat(document.getElementById("amountIn").value);
+      const batchSize = parseInt(document.getElementById("batchSize").value);
+      const gasCost = parseFloat(document.getElementById("gasCost").value);
+      const feePct = parseFloat(document.getElementById("feePercent").value);
+      const minProfit = parseFloat(document.getElementById("minProfit").value);
+      const onlyIfProfitable = document.getElementById("onlyIfProfitable").checked;
+      const buyKey = document.getElementById("buyDex").value;
+      const sellKey = document.getElementById("sellDex").value;
+      const logBox = document.getElementById("log");
+
+      if (buyKey === sellKey) {
+        alert("Buy and Sell DEX cannot be the same.");
+        return;
+      }
+
+      const buyRouter = new ethers.Contract(ROUTERS[buyKey].address, ROUTER_ABI, signer);
+      const sellRouter = new ethers.Contract(ROUTERS[sellKey].address, ROUTER_ABI, signer);
+
+      tokenContract = new ethers.Contract(tokenAddr, ERC20_ABI, signer);
+      tokenDecimals = await tokenContract.decimals();
+      const pathBuy = [tokenAddr, WETH];
+      const pathSell = [WETH, tokenAddr];
+      const amountRaw = ethers.utils.parseUnits(amount.toString(), tokenDecimals);
+
+      document.getElementById("batchInfo").textContent = batchSize;
+      await updateBalance();
+
+      for (let i = 0; i < batchSize; i++) {
+        setTimeout(async () => {
+          try {
+            const buyOut = await buyRouter.getAmountsOut(amountRaw, pathBuy);
+            const wethOut = buyOut[1];
+            const sellOut = await sellRouter.getAmountsOut(wethOut, pathSell);
+            const finalOut = parseFloat(ethers.utils.formatUnits(sellOut[1], tokenDecimals));
+
+            const feeCost = amount * (feePct / 100);
+            const estProfit = finalOut - amount - gasCost - feeCost;
+            const estPct = (estProfit / amount) * 100;
+            const time = new Date().toLocaleTimeString();
+
+            document.getElementById("estProfit").textContent = "$" + estProfit.toFixed(4);
+            document.getElementById("estPct").textContent = estPct.toFixed(2) + "%";
+
+            if (onlyIfProfitable && estProfit < (minProfit / 100 * amount)) {
+              logBox.textContent = `Skipped: est profit ${estProfit.toFixed(4)} USD\n` + logBox.textContent;
+              logSheet(time, buyKey, sellKey, estProfit, estPct, "Skipped", "-");
+              return;
+            }
+
+            const allowance = await tokenContract.allowance(user, ROUTERS[buyKey].address);
+            if (allowance.lt(amountRaw)) {
+              const tx = await tokenContract.approve(ROUTERS[buyKey].address, amountRaw);
+              await tx.wait();
+            }
+
+            const deadline = Math.floor(Date.now() / 1000) + 60;
+
+            const tx = await buyRouter.swapExactTokensForTokens(
+              amountRaw,
+              ethers.BigNumber.from(wethOut).mul(95).div(100),
+              pathBuy,
+              user,
+              deadline
+            );
+            await tx.wait();
+
+            const tx2 = await sellRouter.swapExactTokensForTokens(
+              wethOut,
+              ethers.BigNumber.from(sellOut[1]).mul(95).div(100),
+              pathSell,
+              user,
+              deadline
+            );
+            const receipt2 = await tx2.wait();
+
+            logBox.textContent = `Trade complete: ${tx2.hash}\n` + logBox.textContent;
+            logSheet(time, buyKey, sellKey, estProfit, estPct, "Success", tx2.hash);
+            await updateBalance();
+          } catch (err) {
+            logBox.textContent = "Error: " + err.message + "\n" + logBox.textContent;
+            logSheet(new Date().toLocaleTimeString(), buyKey, sellKey, "-", "-", "Error", "-");
+          }
+        }, i * 3000);
+      }
+    }
+
+    function logSheet(time, buy, sell, profit, pct, status, tx) {
+      const row = document.createElement("tr");
+      row.innerHTML = `
+        <td>${time}</td>
+        <td>${ROUTERS[buy].name}</td>
+        <td>${ROUTERS[sell].name}</td>
+        <td>$${parseFloat(profit).toFixed(4)}</td>
+        <td>${parseFloat(pct).toFixed(2)}%</td>
+        <td>${status}</td>
+        <td>${tx.length > 12 ? '<a href="https://polygonscan.com/tx/' + tx + '" target="_blank">' + tx.slice(0, 10) + '...</a>' : tx}</td>
+      `;
+      document.getElementById("logTable").appendChild(row);
+    }
+  </script>
+</body>
+</html>
